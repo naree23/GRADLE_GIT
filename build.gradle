@@ -1,0 +1,180 @@
+import java.util.zip.ZipFile
+
+plugins {
+  id "com.gradle.build-scan" version "2.1"
+  id 'org.jenkins-ci.jpi' version '0.29.0'
+  id 'ru.vyarus.animalsniffer' version '1.4.6'
+  id 'findbugs'
+  id 'codenarc'
+}
+
+group = 'org.jenkins-ci.plugins'
+description = 'This plugin adds Gradle support to Jenkins'
+
+ext.ciBuild = System.getenv()['JENKINS_URL'] ? true : false
+ext.nextJenkinsVersion = "2.60.3"
+
+if (ciBuild) {
+  println 'This build is running on CI'
+}
+
+jenkinsPlugin {
+  // Version of Jenkins core this plugin depends on.
+  coreVersion = '2.60.3'
+
+  // Human-readable name of plugin.
+  displayName = 'Gradle Plugin'
+
+  // URL for plugin on Jenkins wiki or elsewhere.
+  url = 'https://wiki.jenkins.io/display/JENKINS/Gradle+Plugin'
+
+  // Plugin URL on GitHub. Optional.
+  gitHubUrl = 'https://github.com/jenkinsci/gradle-plugin'
+
+  // Plugin ID, defaults to the project name without trailing '-plugin'
+  shortName = 'gradle'
+
+  compatibleSinceVersion = '1.0'
+
+  developers {
+    developer {
+      id = 'wolfs'
+      name = 'Stefan Wolf'
+    }
+  }
+
+  licenses {
+    license {
+      name = 'MIT License'
+      distribution = 'repo'
+      url = 'https://opensource.org/licenses/MIT'
+    }
+  }
+
+  disabledTestInjection = false
+}
+
+sourceCompatibility = '1.8'
+
+dependencies {
+  jenkinsPlugins 'org.jenkins-ci.plugins:structs:1.5'
+  jenkinsPlugins 'org.jenkins-ci.plugins.workflow:workflow-api:2.20'
+  jenkinsPlugins 'org.jenkins-ci.plugins.workflow:workflow-cps:2.24'
+  jenkinsPlugins 'org.jenkins-ci.plugins.workflow:workflow-job:2.9'
+  jenkinsPlugins 'org.jenkins-ci.plugins.workflow:workflow-basic-steps:2.3'
+  jenkinsPlugins 'org.jenkins-ci.plugins.workflow:workflow-durable-task-step:2.8'
+  jenkinsPlugins 'org.jenkins-ci.plugins.workflow:workflow-step-api:2.10'
+
+  signature 'org.codehaus.mojo.signature:java18:1.0@signature'
+
+  jenkinsTest 'org.jenkins-ci.main:jenkins-test-harness:2.49'
+  jenkinsTest 'org.jenkins-ci.main:jenkins-test-harness-tools:2.2'
+  jenkinsTest 'io.jenkins:configuration-as-code:1.4'
+
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-aggregator:2.5'
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-api:2.20'
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-cps:2.24'
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-job:2.9'
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-basic-steps:2.3'
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-durable-task-step:2.8'
+  jenkinsServer 'org.jenkins-ci.plugins.workflow:workflow-step-api:2.10'
+
+  testImplementation 'org.spockframework:spock-core:1.2-groovy-2.4'
+}
+
+if (project.hasProperty('maxParallelForks')) {
+  project.maxParallelForks = Integer.valueOf(project.maxParallelForks, 10)
+} else {
+  ext.maxParallelForks = 3
+}
+
+animalsniffer {
+  toolVersion = '1.17'
+  sourceSets = [sourceSets.main]
+  // We need to exclude this dependency from animalsniffer since it contains an invalid class
+  excludeJars 'icu4j-*'
+}
+
+findbugs {
+  toolVersion '3.0.1'
+  // This prevents logging some errors when Findbugs tries to open files as jar files.
+  // See https://github.com/gradle/gradle/issues/1094.
+  sourceSets = [sourceSets.main]
+}
+
+findbugsMain {
+  classes = sourceSets.main.output
+}
+
+codenarc {
+  toolVersion '1.2.1'
+  sourceSets = [sourceSets.test]
+}
+
+test {
+  systemProperties['hudson.model.DownloadService.noSignatureCheck'] = 'true'
+  ignoreFailures = ciBuild
+  maxParallelForks = project.maxParallelForks
+}
+
+def checkArchiveManifest(File archive) {
+  new ZipFile(archive).withCloseable { archiveZip ->
+    archiveZip.getInputStream(archiveZip.getEntry('META-INF/MANIFEST.MF')).withStream {
+      assert it.text.contains("Plugin-Version: ${project.version}"): "Wrong metadate in file ${archive} - run a clean build"
+    }
+  }
+}
+
+tasks.withType(AbstractArchiveTask) {
+  inputs.property('pluginVersion') {
+    project.version
+  }
+}
+
+task checkArchiveManifests {
+  dependsOn jar, war
+  doLast {
+    checkArchiveManifest(jar.archiveFile.get().asFile)
+    checkArchiveManifest(war.archiveFile.get().asFile)
+  }
+}
+
+tasks.withType(AbstractPublishToMaven) {
+  dependsOn checkArchiveManifests
+}
+
+defaultTasks.add 'test'
+defaultTasks.add 'jpi'
+
+buildScan {
+    if (ciBuild) {
+        tag('CI')
+        ifNonNull(System.getenv('GIT_BRANCH')) { tag(it) }
+        ifNonNull(System.getenv("GIT_COMMIT")) { value("git-commit-id", it) }
+        ifNonNull(System.getenv('BUILD_URL')) { link('Jenkins build', it) }
+
+        termsOfServiceUrl = "https://gradle.com/terms-of-service"
+        termsOfServiceAgree ="yes"
+        publishAlways()
+    } else {
+        tag 'LOCAL'
+    }
+}
+
+void ifNonNull(value, Closure action) {
+    if (value) {
+        action.call(value)
+    }
+}
+
+task createWrapperZip(type: Zip) {
+  archiveFileName = 'wrapper.zip'
+  destinationDirectory = new File(sourceSets.test.output.resourcesDir, 'gradle')
+
+  from(project.rootDir) {
+    include('gradle/**')
+    include('gradlew*')
+  }
+}
+
+processTestResources.dependsOn(createWrapperZip)
